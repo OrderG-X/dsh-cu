@@ -1,0 +1,10 @@
+{
+  "name": "dsh-cu-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH desktop computer-use tools on top of a vision-first helper: window list, screenshots, coordinate clicks, typing. No Accessibility dependency.",
+  "license": "MIT",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}
