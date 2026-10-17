@@ -1,10 +1,46 @@
 {
-  "name": "dsh-cu-desktop",
-  "version": "1.0.1",
+  "name": "dsh-mac-computer-use",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "DSH desktop computer-use tools on top of a vision-first helper: window list, screenshots, coordinate clicks, typing. No Accessibility dependency.",
+  "description": "Vision-first Mac computer use for DSH: window list, screenshots, OCR text targeting, numbered elements, background clicks and typing. Works without the accessibility tree.",
   "license": "MIT",
-  "exports": { ".": "./index.js", "./package.json": "./package.json" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+  "author": "OrderG-X",
+  "homepage": "https://github.com/OrderG-X/dsh-mac-computer-use",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OrderG-X/dsh-mac-computer-use.git",
+    "directory": "plugin"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon.svg": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "setup.js",
+    "panel.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "package.json"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
 }

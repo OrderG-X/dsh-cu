@@ -1,6 +1,9 @@
-# dsh-cu
+# dsh-mac-computer-use
 
-**给 DSH 的 macOS 桌面操作能力。视觉优先，不依赖无障碍权限。**
+**给 DSH 的 Mac 桌面操作能力（computer use）。视觉优先，不依赖无障碍权限。**
+
+> 以前叫 `dsh-cu`，2026-10-18 改名。旧地址会自动跳到这里；底层的命令行引擎仍叫 `dsh-cu`。
+> 和别人家的 [dsh-computer-use](https://github.com/988hj7tczd-oss/dsh-computer-use) 不是一个东西：那个靠无障碍树（cua-driver），这个靠截图。
 
 ![光标动效](assets/cursor-demo.gif)
 
@@ -38,8 +41,8 @@ DSH 上已有的 computer use 插件（`dsh-computer-use`、`dsh-mac-cua` 等）
 ## 安装
 
 ```bash
-git clone https://github.com/OrderG-X/dsh-cu.git
-cd dsh-cu
+git clone https://github.com/OrderG-X/dsh-mac-computer-use.git
+cd dsh-mac-computer-use
 ./install.sh
 ```
 
@@ -47,6 +50,8 @@ cd dsh-cu
 光标素材用 Pillow 生成（`python3 -m pip install pillow numpy`），没有也能跑，只是光标退化成简单箭头。
 
 装完去 DSH 的**插件页**，把这个仓库地址加进去，然后**重启 DSH**。
+
+装好后插件页里叫「**Mac 桌面操作**」。点进去是设置页：能不能用、看得到几个窗口，命令行引擎、屏幕录制权限、辅助功能权限、光标浮层逐项打勾，缺哪个就给哪个的按钮（复制安装命令 / 打开系统设置）；还有「屏幕上显示操作光标」开关。
 
 ---
 

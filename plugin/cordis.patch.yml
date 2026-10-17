@@ -1,4 +1,4 @@
-# Bundle patch for dsh-cu-desktop
+# Bundle patch for dsh-mac-computer-use: inserts the plugin row into the DSH profile.
 - insert:
-    - id: dsh-cu-desktop
-      name: dsh-cu-desktop
+    - id: mac-computer-use
+      name: 'dsh-mac-computer-use'

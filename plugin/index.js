@@ -1,5 +1,5 @@
 /**
- * dsh-cu-desktop —— 给 DSH 一组桌面操作工具（视觉优先）
+ * dsh-mac-computer-use —— 给 DSH 一组 Mac 桌面操作工具（视觉优先）
  *
  * 为什么不用 dsh-computer-use / cua-driver：那套依赖 macOS 无障碍树（AX），
  * 而这台机器上第三方二进制拿不到 AXWindow（锁屏时尤其明显）。这里改走**视觉路线**：
@@ -10,7 +10,8 @@
  *
  * 这正是 Codex 那种 computer use 的做法，也是目前这台机器上唯一确定能走通的路。
  *
- * 底层是 ~/Projects/dsh-cua-patched/tools/dsh-cu（Swift，源码同目录）。
+ * 底层引擎是 dsh-cu（Swift 单文件命令行，源码在仓库 tools/，install.sh 装到 ~/.dsh/bin/）。
+ * 本机环境（命令行在哪、权限、用户设置）在 setup.js；DSH 设置页的后端在 panel.js、前端在 client.js。
  */
 
 import { spawn, execFileSync } from 'node:child_process'
@@ -18,50 +19,34 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { findBin, INSTALL_HINT, OVERLAY, readConfig } from './setup.js'
+import { PANEL_ROUTE, panelHandler } from './panel.js'
 
-export const name = 'dsh-cu-desktop'
+export const name = 'dsh-mac-computer-use'
 export const inject = ['tools']
 
-const TRACE = '/tmp/dsh-cu-desktop.log'
+const TRACE = '/tmp/dsh-mac-computer-use.log'
 function trace(line) {
   try { fs.appendFileSync(TRACE, `${new Date().toISOString()} ${line}\n`) } catch {}
 }
 
-// 找 dsh-cu 的位置：先看环境变量，再看待安装位置，最后是开发目录（本机调试用）
-const CANDIDATES = [
-  process.env.DSH_CU_BIN,
-  path.join(os.homedir(), '.dsh/bin/dsh-cu'),
-  path.join(os.homedir(), 'Projects/dsh-cua-patched/tools/dsh-cu'),
-].filter(Boolean)
-
-/** 找不到二进制时的报错：必须自带公开安装步骤，不能只有本机才看得懂的路径提示。 */
-const INSTALL_HINT = [
-  'dsh-cu 还没装（一次性前置，装完不用再管）：',
-  '1. 装 Xcode 命令行工具（提供 swiftc）：xcode-select --install',
-  '2. 拉源码并编译：',
-  '     git clone https://github.com/OrderG-X/dsh-cu.git && cd dsh-cu && ./install.sh',
-  '   它会用 swiftc 编译 dsh-cu 与光标浮层，装到 ~/.dsh/bin/',
-  '3. 回到这里重试即可（想看装没装好：ls ~/.dsh/bin/dsh-cu）',
-  '二进制在别处的话，用 DSH_CU_BIN=/path/to/dsh-cu 指过去。',
-].join('\n')
-
 function cuBin() {
-  for (const p of CANDIDATES) {
-    try { fs.accessSync(p, fs.constants.X_OK); return p } catch {}
-  }
-  throw new Error(INSTALL_HINT)
+  const bin = findBin()
+  if (!bin) throw new Error(INSTALL_HINT)
+  return bin.path
 }
 
 // ── 系统级光标浮层 ─────────────────────────────────────────────────────────
 // 用户想看得见操作时，屏幕上得有个光标在动。浮层是独立的 NSPanel 进程：
 // 不抢前台、点击穿透、永远置顶。这里按需拉起 —— 第一次要动桌面时才起，
-// 不需要开机常驻，用户零操作。
+// 不需要开机常驻，用户零操作。DSH 设置页里关掉「显示光标」就不起、也不让命令行去起。
 
-const OVERLAY = path.join(os.homedir(), '.dsh/bin/dsh-cursor-overlay')
 let cursorChecked = false
 
+const cursorOn = () => readConfig().showCursor !== false
+
 function ensureCursor() {
-  if (cursorChecked) return
+  if (cursorChecked || !cursorOn()) return
   cursorChecked = true
   try {
     execFileSync('/usr/bin/pgrep', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' })
@@ -278,6 +263,7 @@ export function apply(ctx, config) {
         ensureCursor()
         const a = ['clickat', String(args.pid), String(Math.round(x)), String(Math.round(y))]
         if (args.global) a.push('--global')
+        if (!cursorOn()) a.push('--no-cursor')
         await run(a)
         return { text: `已点击 ${how} → (${Math.round(x)}, ${Math.round(y)})` }
       },
@@ -312,6 +298,7 @@ export function apply(ctx, config) {
         const out = path.join(os.tmpdir(), `dsh-cu-observe-${args.pid}-${Date.now()}.png`)
         const a = ['observe', String(args.pid), '--out', out]
         if (args.limit) a.push('--limit', String(args.limit))
+        if (!cursorOn()) a.push('--no-cursor')
         ensureCursor()
         let raw
         try {
@@ -459,6 +446,20 @@ export function apply(ctx, config) {
     try { ctx.tools.register(tool) } catch (e) { trace(`注册 ${tool.name} 失败: ${e && e.message}`); throw e }
   }
   trace(`已注册 ${tools.length} 个工具: ${tools.map((t) => t.name).join(', ')}`)
+
+  // DSH 设置页的数据路由。挂不上也只是设置页没数据，绝不能连累工具注册
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (sub) => {
+        if (!sub || typeof sub.effect !== 'function' || !sub.webServer) return
+        sub.effect(() => sub.webServer.register({
+          kind: 'exact', path: PANEL_ROUTE,
+          handler: panelHandler({ origin: () => sub.webServer.getOrigin(), trace }),
+        }), 'dsh-mac-computer-use: settings panel route')
+        trace(`设置页路由已挂上 ${PANEL_ROUTE}`)
+      })
+    }
+  } catch (e) { trace(`设置页路由没挂上（忽略）: ${e && e.message}`) }
 }
 
 trace('模块已加载')

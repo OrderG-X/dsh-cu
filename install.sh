@@ -1,5 +1,5 @@
 #!/bin/bash
-# dsh-cu 一键安装：编译命令行工具 + 光标浮层，铺好素材。
+# dsh-mac-computer-use 一键安装：编译命令行引擎 dsh-cu + 光标浮层，铺好素材。
 # 装完再去 DSH 的插件页把本仓库的 plugin/ 目录（或仓库地址）加进去。
 set -euo pipefail
 
@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="${DSH_BIN_DIR:-$HOME/.dsh/bin}"
 SHARE="${DSH_SHARE_DIR:-$HOME/.dsh/share}"
 
-echo "═══ dsh-cu 安装 ═══"
+echo "═══ dsh-mac-computer-use 安装 ═══"
 echo "  仓库: $HERE"
 echo "  目标: $BIN"
 echo
