@@ -1,6 +1,6 @@
 {
   "name": "dsh-cu-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "DSH desktop computer-use tools on top of a vision-first helper: window list, screenshots, coordinate clicks, typing. No Accessibility dependency.",

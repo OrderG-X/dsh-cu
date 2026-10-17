@@ -27,18 +27,29 @@ function trace(line) {
   try { fs.appendFileSync(TRACE, `${new Date().toISOString()} ${line}\n`) } catch {}
 }
 
-// 找 dsh-cu 的位置：先看环境变量，再看待安装位置，最后是开发目录
+// 找 dsh-cu 的位置：先看环境变量，再看待安装位置，最后是开发目录（本机调试用）
 const CANDIDATES = [
   process.env.DSH_CU_BIN,
   path.join(os.homedir(), '.dsh/bin/dsh-cu'),
   path.join(os.homedir(), 'Projects/dsh-cua-patched/tools/dsh-cu'),
 ].filter(Boolean)
 
+/** 找不到二进制时的报错：必须自带公开安装步骤，不能只有本机才看得懂的路径提示。 */
+const INSTALL_HINT = [
+  'dsh-cu 还没装（一次性前置，装完不用再管）：',
+  '1. 装 Xcode 命令行工具（提供 swiftc）：xcode-select --install',
+  '2. 拉源码并编译：',
+  '     git clone https://github.com/OrderG-X/dsh-cu.git && cd dsh-cu && ./install.sh',
+  '   它会用 swiftc 编译 dsh-cu 与光标浮层，装到 ~/.dsh/bin/',
+  '3. 回到这里重试即可（想看装没装好：ls ~/.dsh/bin/dsh-cu）',
+  '二进制在别处的话，用 DSH_CU_BIN=/path/to/dsh-cu 指过去。',
+].join('\n')
+
 function cuBin() {
   for (const p of CANDIDATES) {
     try { fs.accessSync(p, fs.constants.X_OK); return p } catch {}
   }
-  throw new Error('找不到 dsh-cu。跑一下仓库里的 install.sh，或设 DSH_CU_BIN 指向它')
+  throw new Error(INSTALL_HINT)
 }
 
 // ── 系统级光标浮层 ─────────────────────────────────────────────────────────
