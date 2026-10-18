@@ -40,29 +40,80 @@ function cuBin() {
 // 用户想看得见操作时，屏幕上得有个光标在动。浮层是独立的 NSPanel 进程：
 // 不抢前台、点击穿透、永远置顶。这里按需拉起 —— 第一次要动桌面时才起，
 // 不需要开机常驻，用户零操作。DSH 设置页里关掉「显示光标」就不起、也不让命令行去起。
+// 浮层闲 60 秒会自己退出，所以每次都探一下：FIFO 能以非阻塞方式打开 = 有读者 = 浮层活着。
 
-let cursorChecked = false
+const FIFO = '/tmp/dsh-cursor.fifo'
+// 浮层拉不起来（比如二进制坏了）就歇 5 分钟再试，别让每次桌面操作都白等
+let cursorFailedAt = 0
+const nap = new Int32Array(new SharedArrayBuffer(4))
 
 const cursorOn = () => readConfig().showCursor !== false
 
+function fifoOpen() {
+  try {
+    if (!fs.statSync(FIFO).isFIFO()) return -1          // 残留的普通文件别往里写
+    return fs.openSync(FIFO, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+  } catch { return -1 }                                  // 没文件 / 没读者（ENXIO）
+}
+
+function overlayRunning() {
+  try { execFileSync('/usr/bin/pgrep', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' }); return true } catch { return false }
+}
+
 function ensureCursor() {
-  if (cursorChecked || !cursorOn()) return
-  cursorChecked = true
-  try {
-    execFileSync('/usr/bin/pgrep', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' })
-    trace('光标浮层已在跑')
-    return
-  } catch { /* 没跑，起一个 */ }
-  try {
-    fs.accessSync(OVERLAY, fs.constants.X_OK)
-    const child = spawn(OVERLAY, [], { detached: true, stdio: 'ignore' })
-    child.unref()
-    // 等浮层把 FIFO 读端打开，否则这一次的光标 ping 会落空
-    try { execFileSync('/bin/sleep', ['0.7']) } catch {}
-    trace('已拉起光标浮层')
-  } catch (e) {
-    trace(`光标浮层起不来: ${e && e.message}（不影响操作，只是看不见光标）`)
+  if (!cursorOn()) return
+  const fd = fifoOpen()
+  if (fd >= 0) { fs.closeSync(fd); return }
+  // 进程在、FIFO 还没好 = 刚起（刚装好的二进制第一次启动 macOS 要验一下，会慢一点）：等它，别再起第二个
+  const running = overlayRunning()
+  if (!running) {
+    if (Date.now() - cursorFailedAt < 5 * 60_000) return
+    try {
+      fs.accessSync(OVERLAY, fs.constants.X_OK)
+      const child = spawn(OVERLAY, [], { detached: true, stdio: 'ignore' })
+      child.unref()
+    } catch (e) {
+      cursorFailedAt = Date.now()
+      trace(`光标浮层起不来: ${e && e.message}（不影响操作，只是看不见光标；5 分钟后再试）`)
+      return
+    }
   }
+  // 等浮层把 FIFO 读端打开（最多 2 秒），否则这一次的光标指令会落空
+  for (let i = 0; i < 40; i++) {
+    Atomics.wait(nap, 0, 0, 50)                           // 同步睡 50ms，不用每次起个 sleep 进程
+    const f = fifoOpen()
+    if (f >= 0) {
+      fs.closeSync(f)
+      cursorFailedAt = 0
+      if (!running) trace('已拉起光标浮层')
+      return
+    }
+  }
+  if (!overlayRunning()) {
+    cursorFailedAt = Date.now()
+    trace('光标浮层起不来：拉起后 2 秒内没见到它（不影响操作，只是看不见光标；5 分钟后再试）')
+  }
+}
+
+/** 给浮层发几行指令（move / label / click …）。浮层没在跑就算了，绝不拖慢操作。 */
+function cursorSay(...cmds) {
+  if (!cursorOn()) return
+  const fd = fifoOpen()
+  if (fd < 0) return
+  try { fs.writeSync(fd, cmds.map((c) => String(c).replace(/[\r\n]+/g, ' ') + '\n').join('')) } catch {}
+  finally { try { fs.closeSync(fd) } catch {} }
+}
+
+/** 名牌上的短文字 */
+const short = (s, n = 14) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim()
+  return t.length > n ? t.slice(0, n - 1) + '…' : t
+}
+
+/** 输入的内容像不像密码：没有空格、没有中日韩文字的一串就不往屏幕上写 */
+const typedLabel = (text) => {
+  const t = String(text ?? '')
+  return /\s|[\u3000-\u9fff\uac00-\ud7af]/.test(t) ? `输入「${short(t, 12)}」` : `输入 ${t.length} 个字符`
 }
 
 function run(args, timeoutMs = 30000) {
@@ -252,7 +303,9 @@ export function apply(ctx, config) {
       async execute(args) {
         if (args.index) {
           ensureCursor()
-          return { text: await run(['click-index', String(args.pid), String(args.index)]) }
+          const a = ['click-index', String(args.pid), String(args.index)]
+          if (!cursorOn()) a.push('--no-cursor')
+          return { text: await run(a) }
         }
         let x = args.x, y = args.y, how = '坐标'
         if (args.text) {
@@ -261,6 +314,7 @@ export function apply(ctx, config) {
         }
         if (x === undefined || y === undefined) throw new Error('要么给 text，要么给 x 和 y')
         ensureCursor()
+        cursorSay(args.text ? `label 点击 ${short(args.text)}` : 'label 点击')
         const a = ['clickat', String(args.pid), String(Math.round(x)), String(Math.round(y))]
         if (args.global) a.push('--global')
         if (!cursorOn()) a.push('--no-cursor')
@@ -300,6 +354,7 @@ export function apply(ctx, config) {
         if (args.limit) a.push('--limit', String(args.limit))
         if (!cursorOn()) a.push('--no-cursor')
         ensureCursor()
+        cursorSay('label 查看窗口')
         let raw
         try {
           raw = await run(a, 60000)
@@ -355,6 +410,7 @@ export function apply(ctx, config) {
       output: textOutput,
       presentCall: present('Desktop type'),
       async execute(args) {
+        cursorSay(`label ${typedLabel(args.text)}`)
         return { text: await run(['type', String(args.pid), args.text]) }
       },
     }),
@@ -399,8 +455,10 @@ export function apply(ctx, config) {
       presentCall: present('Desktop scroll'),
       async execute(args) {
         ensureCursor()
+        cursorSay(`label ${args.dy < 0 ? '向上滚动' : '向下滚动'}`)
         const a = ['scroll', String(args.pid), String(args.x), String(args.y), String(args.dy)]
         if (args.dx) a.push(String(args.dx))
+        if (!cursorOn()) a.push('--no-cursor')
         return { text: await run(a) }
       },
     }),
@@ -419,7 +477,10 @@ export function apply(ctx, config) {
       presentCall: present('Desktop drag'),
       async execute(args) {
         ensureCursor()
-        return { text: await run(['drag', String(args.pid), String(args.x1), String(args.y1), String(args.x2), String(args.y2)]) }
+        cursorSay('label 拖拽')
+        const a = ['drag', String(args.pid), String(args.x1), String(args.y1), String(args.x2), String(args.y2)]
+        if (!cursorOn()) a.push('--no-cursor')
+        return { text: await run(a) }
       },
     }),
 

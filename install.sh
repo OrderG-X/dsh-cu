@@ -1,5 +1,5 @@
 #!/bin/bash
-# dsh-mac-computer-use 一键安装：编译命令行引擎 dsh-cu + 光标浮层，铺好素材。
+# dsh-mac-computer-use 一键安装：编译命令行引擎 dsh-cu + 光标浮层（光标是代码画的，不用素材）。
 # 装完再去 DSH 的插件页把本仓库的 plugin/ 目录（或仓库地址）加进去。
 set -euo pipefail
 
@@ -35,24 +35,7 @@ swiftc -O -o "$BIN/dsh-cursor-overlay" "$HERE/cursor/cursor-overlay.swift" \
   -framework AppKit -framework QuartzCore
 echo "   ✅ $BIN/dsh-cursor-overlay"
 
-# ── 3. 光标素材 ─────────────────────────────────────────────────────────────
-echo "③ 生成光标素材 …"
-if [ -f "$SHARE/dsh-cursor-solid.png" ] && [ "${DSH_FORCE_CURSOR:-0}" != "1" ]; then
-  echo "   ⏭  已有素材，跳过（想重做设 DSH_FORCE_CURSOR=1）"
-elif python3 -c "import PIL" 2>/dev/null; then
-  DSH_SHARE_DIR="$SHARE" python3 "$HERE/cursor/make-cursor.py"
-else
-  echo "   ⚠️  没有 Pillow，跳过（光标会退化成内置的简单箭头）"
-  echo "      想修的话：python3 -m pip install pillow numpy"
-fi
-
-# ── 4. 页内光标（浏览器用）──────────────────────────────────────────────────
-echo "④ 铺页内光标 …"
-mkdir -p "$HOME/.dsh/chrome-cursor"
-cp "$HERE/cursor/in-page-cursor.js" "$HOME/.dsh/chrome-cursor/"
-echo "   ✅ ~/.dsh/chrome-cursor/in-page-cursor.js"
-
-# ── 5. PATH ─────────────────────────────────────────────────────────────────
+# ── 3. PATH ─────────────────────────────────────────────────────────────────
 if ! echo "$PATH" | grep -q "$BIN"; then
   echo
   echo "⚠️  $BIN 不在 PATH 里。加到 shell 配置："

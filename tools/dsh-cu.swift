@@ -22,9 +22,9 @@
 //   dsh-cu key <pid> <keycode> [flags] 按键（flags: cmd/shift/alt/ctrl，可组合）
 //   dsh-cu find <文字> [--pid N]       OCR 找屏幕上的文字 → 输出可点的坐标
 //   dsh-cu observe <pid> [--out 路径]   **set-of-mark**：截图上给可点元素编号
-//   dsh-cu click-index <pid> <编号>      点编号对应的元素
-//   dsh-cu scroll <pid> <x> <y> <dy> [dx]   滚轮
-//   dsh-cu drag <pid> <x1> <y1> <x2> <y2>   拖拽
+//   dsh-cu click-index <pid> <编号> [--no-cursor]  点编号对应的元素（会联动浮层光标）
+//   dsh-cu scroll <pid> <x> <y> <dy> [dx] [--no-cursor]   滚轮（会联动浮层光标）
+//   dsh-cu drag <pid> <x1> <y1> <x2> <y2> [--no-cursor]   拖拽（会联动浮层光标）
 //   dsh-cu apps                             列出运行中的应用（* = 前台）
 //   dsh-cu launch <bundleId|应用名>          后台启动应用（不抢前台）
 //   dsh-cu shot [--out 路径]           截屏
@@ -370,7 +370,7 @@ case "observe":
     }
 
 case "click-index":
-    guard args.count >= 3, let pid = pid_t(args[1]), let want = Int(args[2]) else { fail("用法: dsh-cu click-index <pid> <编号>") }
+    guard args.count >= 3, let pid = pid_t(args[1]), let want = Int(args[2]) else { fail("用法: dsh-cu click-index <pid> <编号> [--no-cursor]") }
     guard let win = windowsOfAX(pid).first else { fail("没有 AX 窗口") }
     var marks: [AXUIElement] = []
     var seenI = Set<CFHashCode>()
@@ -391,6 +391,16 @@ case "click-index":
     collect2(win, 0)
     guard want >= 1, want <= marks.count else { fail("编号越界（1...\(marks.count)）") }
     let el = marks[want - 1]
+    // 光标先滑到元素中心、名牌写上要点什么，再按（跟 clickat 一个节奏）
+    cursorOverlayOff = args.contains("--no-cursor")
+    if !cursorOverlayOff, let f = frame(el) {
+        ensureOverlay()
+        let name = label(el).replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        overlayPing(name.isEmpty ? "label 点击" : "label 点击 \(name.count > 14 ? String(name.prefix(13)) + "…" : name)")
+        overlayPing("move \(Int(f.midX)) \(Int(f.midY))")
+        usleep(300_000)
+        overlayPing("click")
+    }
     var err = AXUIElementPerformAction(el, kAXPressAction as CFString)
     if err != .success, let f = frame(el) {
         err = postClick(pid: pid, at: CGPoint(x: f.midX, y: f.midY)) ? .success : .failure
@@ -399,9 +409,17 @@ case "click-index":
 
 case "scroll":
     guard args.count >= 5, let pid = pid_t(args[1]), let x = Double(args[2]), let y = Double(args[3]), let dy = Int32(args[4]) else {
-        fail("用法: dsh-cu scroll <pid> <x> <y> <dy> [dx]")
+        fail("用法: dsh-cu scroll <pid> <x> <y> <dy> [dx] [--no-cursor]")
     }
     let dx = args.count >= 6 ? Int32(args[5]) ?? 0 : 0
+    // 光标先滑到滚动的位置，右上角亮一下滚动方向
+    cursorOverlayOff = args.contains("--no-cursor")
+    if !cursorOverlayOff {
+        ensureOverlay()
+        overlayPing("move \(Int(x)) \(Int(y))")
+        usleep(300_000)
+        overlayPing("scroll \(dy < 0 ? -1 : 1)")
+    }
     guard let e = CGEvent(scrollWheelEvent2Source: CGEventSource(stateID: .hidSystemState),
                           units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { fail("造不出滚动事件") }
     e.location = CGPoint(x: x, y: y)
@@ -412,7 +430,15 @@ case "drag":
     guard args.count >= 6, let pid = pid_t(args[1]),
           let x1 = Double(args[2]), let y1 = Double(args[3]),
           let x2 = Double(args[4]), let y2 = Double(args[5]) else {
-        fail("用法: dsh-cu drag <pid> <x1> <y1> <x2> <y2>")
+        fail("用法: dsh-cu drag <pid> <x1> <y1> <x2> <y2> [--no-cursor]")
+    }
+    // 光标：先滑到起点、按住（尖端一圈光晕），跟着每一步走到终点，再松开 —— 跟浏览器拖拽一个样
+    cursorOverlayOff = args.contains("--no-cursor")
+    if !cursorOverlayOff {
+        ensureOverlay()
+        overlayPing("move \(Int(x1)) \(Int(y1))")
+        usleep(300_000)
+        overlayPing("down")
     }
     let src = CGEventSource(stateID: .hidSystemState)
     let from = CGPoint(x: x1, y: y1), to = CGPoint(x: x2, y: y2)
@@ -422,9 +448,11 @@ case "drag":
         let t = Double(i) / Double(steps)
         let pt = CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t)
         CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: pt, mouseButton: .left)?.postToPid(pid)
+        overlayPing("show \(Int(pt.x)) \(Int(pt.y))")
         usleep(15_000)
     }
     CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left)?.postToPid(pid)
+    overlayPing("up")
     print("已拖拽 (\(Int(x1)),\(Int(y1))) → (\(Int(x2)),\(Int(y2)))")
 
 case "apps":
@@ -493,30 +521,40 @@ func windowsOf(_ pid: pid_t) -> [CGRect] {
 
 var cursorOverlayOff = false
 
+/// FIFO 能以非阻塞方式打开 = 有读者 = 浮层活着、收得到指令
+func overlayReady() -> Bool {
+    let fd = open("/tmp/dsh-cursor.fifo", O_WRONLY | O_NONBLOCK)
+    guard fd >= 0 else { return false }
+    close(fd)
+    return true
+}
+
+func overlayRunning() -> Bool {
+    let probe = Process()
+    probe.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    probe.arguments = ["-f", "dsh-cursor-overlay"]
+    probe.standardOutput = FileHandle.nullDevice
+    probe.standardError = FileHandle.nullDevice
+    try? probe.run(); probe.waitUntilExit()
+    return probe.terminationStatus == 0
+}
+
 /// 浮层没在跑就拉起来（跟插件里的 ensureCursor 一个意思，让命令行单独用也有特效）
 func ensureOverlay() {
-    let fifo = "/tmp/dsh-cursor.fifo"
-    // 有 FIFO 文件 ≠ 浮层活着：进程被 kill 后文件会残留，于是写入超时、特效全哑。
-    // 必须真探一下进程。
-    if FileManager.default.fileExists(atPath: fifo) {
-        let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        probe.arguments = ["-f", "dsh-cursor-overlay"]
-        probe.standardOutput = FileHandle.nullDevice
-        probe.standardError = FileHandle.nullDevice
-        try? probe.run(); probe.waitUntilExit()
-        if probe.terminationStatus == 0 { return }              // 真活着
-        try? FileManager.default.removeItem(atPath: fifo)        // 残留，清掉重来
+    if overlayReady() { return }
+    // 进程在、FIFO 还没好 = 刚起（刚装好的二进制第一次启动 macOS 要验一下，会慢一点）：等它，别再起第二个
+    if !overlayRunning() {
+        let bin = NSString(string: "~/.dsh/bin/dsh-cursor-overlay").expandingTildeInPath
+        guard FileManager.default.isExecutableFile(atPath: bin) else { return }
+        try? FileManager.default.removeItem(atPath: "/tmp/dsh-cursor.fifo")   // 进程被 kill 后残留的，清掉
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
     }
-    let bin = NSString(string: "~/.dsh/bin/dsh-cursor-overlay").expandingTildeInPath
-    guard FileManager.default.isExecutableFile(atPath: bin) else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: bin)
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
-    try? p.run()
-    for _ in 0..<20 {
-        if FileManager.default.fileExists(atPath: fifo) { break }
+    for _ in 0..<40 {                                     // 最多等 2 秒
+        if overlayReady() { return }
         usleep(50_000)
     }
 }

@@ -7,9 +7,9 @@
 
 ![光标动效](assets/cursor-demo.gif)
 
-*光标按 Codex 的 `scoot` 模型实现：移动时沿运动方向拉伸、点击时原地均匀缩小（支点在箭头尖端，所以瞄准点纹丝不动）。*
+*桌面光标：实心蓝箭头 + 带显示器图标的「DSH」名牌，干活时名牌写上正在做什么。跟 [dsh-chrome-bridge](https://github.com/OrderG-X/dsh-chrome-bridge) 的浏览器光标是同一套样式，那边是半透明的、名牌带地球图标。*
 
-11 个 `desktop_*` 工具 + 一个自包含的 Swift 命令行 + 一套 Codex 风格的光标动效。
+11 个 `desktop_*` 工具 + 一个自包含的 Swift 命令行 + 一个看得见的桌面光标。
 
 ```
 desktop_windows    desktop_observe    desktop_screenshot   desktop_find_text
@@ -32,7 +32,7 @@ DSH 上已有的 computer use 插件（`dsh-computer-use`、`dsh-mac-cua` 等）
 |---|---|
 | **OCR 找文字** | 用 macOS 自带的 Vision 框架，本地跑。`desktop_click(text="登录")` 直接按文字点 |
 | **元素编号** | `desktop_observe` 把可点元素在截图上编号，模型说"点第 7 个"就行 |
-| **Codex 风格光标** | 从 Codex Computer Use 的资源里描出形状，配了弹簧动效（scoot） |
+| **看得见的光标** | 屏幕上有个蓝色光标跟着操作走，名牌写着「点击 发送」这类动作；跟浏览器插件的光标一套样式 |
 | **空闲自退** | 光标浮层 60 秒没动静自己走，不留常驻进程 |
 | **单文件 Swift** | 零依赖，好审计 |
 
@@ -46,8 +46,7 @@ cd dsh-mac-computer-use
 ./install.sh
 ```
 
-需要 macOS + Xcode Command Line Tools（`xcode-select --install`）。
-光标素材用 Pillow 生成（`python3 -m pip install pillow numpy`），没有也能跑，只是光标退化成简单箭头。
+需要 macOS + Xcode Command Line Tools（`xcode-select --install`）。光标是代码画的，不用另装素材。
 
 装完去 DSH 的**插件页**，把这个仓库地址加进去，然后**重启 DSH**。
 
@@ -107,26 +106,24 @@ dsh-cu selftest                   # 全链路自检（见 tools/selftest.sh）
 
 ## 光标
 
-`cursor/` 里是 Codex 风格的桌面光标浮层和网页页内光标：
+`cursor/cursor-overlay.swift` 是桌面光标浮层（装到 `~/.dsh/bin/dsh-cursor-overlay`）：NSPanel，不抢前台、点击穿透、永远置顶，闲 60 秒自己退出。
 
-| | 用在哪 | 样子 |
+跟 [dsh-chrome-bridge](https://github.com/OrderG-X/dsh-chrome-bridge) 的浏览器光标是**一套样式**，一眼分得清是在哪边干活：
+
+| | 桌面（这个仓库） | 浏览器（dsh-chrome-bridge） |
 |---|---|---|
-| `dsh-cursor-overlay` | 操作应用 | 蓝色实心箭头，**NSPanel 浮层**：不抢前台、点击穿透、永远置顶 |
-| `in-page-cursor.js` | 操作浏览器 | 半透明蓝色，注入页面，**会出现在截图里** |
+| 箭头 | 同一个形状，实心蓝 | 同一个形状，半透明淡蓝 |
+| 名牌 | 显示器图标 + DSH | 地球图标 + DSH |
+| 干活时 | 名牌展开成「DSH · 点击 发送」 | 名牌展开成「DSH · 点击 登录」 |
 
-**动效**（照 Codex 的 `scoot` 参数名实现）：
+**动效**走克制路线，两边一样：
 
-- 移动时**沿运动方向拉伸**（峰值 1.30）+ 快速移动时轻微模糊 + 朝运动方向侧倾
-- 点击时**原地均匀缩小**到 0.88（支点在箭头尖端，所以瞄准点纹丝不动）
-- 静止时轻微呼吸 + 24 帧流动渐变
+- 同一个弹簧、同一套算法：沿轻微的弧线滑过去，顺着速度方向轻轻拉长（最多 7%）、略侧倾，名牌晚半拍跟上；到了冲过头最多两三像素再落回
+- 点击时以箭头尖端为支点缩一下再弹回（瞄准点纹丝不动），一圈淡波纹
+- 拖拽时按住（缩一点 + 尖端一圈光晕）跟着走；滚动时右上角亮一下方向
+- 闲 6 秒变淡、名牌收起，不挡视线；系统开了「减少动态效果」就不做动画
 
-实测一次 1100px 的移动：
-
-```
-vel=9902  stretch=1.300  blur=1.00  tilt=0.129   ← 起飞
-vel=1425  stretch=1.164  blur=0.44               ← 减速
-vel=0     stretch=1.000  blur=0.00               ← 落位收回
-```
+浮层指令（往 `/tmp/dsh-cursor.fifo` 写一行）：`show x y` / `move x y` / `click [n]` / `down` / `up` / `scroll ±1` / `label 文字` / `hide` / `ping`。
 
 ---
 
@@ -154,8 +151,4 @@ MIT。`tools/dsh-cu.swift` 是自包含单文件，想改直接改。
 
 ## 关于光标形状
 
-仓库里的光标是**程序绘制的**（`cursor/make-cursor.py`），形状是经典 macOS 箭头几何，
-配色是蓝色渐变 —— 不包含任何第三方的素材文件。
-
-我们自己那套更"Codex 味"的形状，是从 Codex Computer Use 的安装包里描出来的（学习用途），
-**没有放进这个仓库**。你要是本地装了 Codex，可以自己提取了对比着玩。
+光标是**代码画的**（`cursor/cursor-overlay.swift` 里的 `arrowPath`），圆角经典箭头 + 蓝色渐变，跟浏览器那边用同一条路径 —— 不包含任何第三方素材文件。
