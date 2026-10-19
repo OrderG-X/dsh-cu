@@ -1,4 +1,15 @@
-# dsh-mac-computer-use
+<div align="center">
+
+<img src="assets/hero.svg" alt="dsh-mac-computer-use — 让 DSH 看着屏幕操作你的 Mac" width="760" />
+
+<p>
+  <a href="https://github.com/OrderG-X/dsh-mac-computer-use/releases"><img src="https://img.shields.io/github/v/release/OrderG-X/dsh-mac-computer-use?label=release&color=4D6BFE" alt="release" /></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" />
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/DSH-plugin-4D6BFE" alt="DSH plugin" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white" alt="macOS" />
+</p>
+
+</div>
 
 **给 DSH 的 Mac 桌面操作能力（computer use）。视觉优先，不依赖无障碍权限。**
 
