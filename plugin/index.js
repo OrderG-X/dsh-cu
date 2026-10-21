@@ -330,17 +330,28 @@ export function apply(ctx, config) {
         try {
           const a = ['shot']
           let target = '主显示器'
+          let rect = null
           if (args.pid) {
             const wins = parseWindows(await run(['winlist'])).filter((w) => w.pid === Number(args.pid))
             if (!wins.length) throw new Error(`pid ${args.pid} 没有可见窗口`)
             const w = wins[0]
             target = `${w.app} «${w.title}»`
-            // 引擎截窗口所在那块屏，按那块屏的原点和缩放比裁（Retina / 副屏 / 负坐标都对）
-            a.push('--rect', `${w.x},${w.y},${w.width},${w.height}`)
+            // 优先按 CGWindowID 直接抓窗口：被遮挡、在别的 Space 也能拿到目标窗口本身；
+            // 图缩放到窗口的点尺寸，保持「1 像素 = 1 点」的坐标换算。
+            try {
+              execFileSync('/usr/sbin/screencapture', ['-x', '-o', '-l', String(w.windowId), file], { stdio: 'ignore' })
+              execFileSync('/usr/bin/sips', ['-z', String(w.height), String(w.width), file, '--out', file], { stdio: 'ignore' })
+              rect = { x: w.x, y: w.y, width: w.width, height: w.height }
+            } catch {
+              // 窗口无法按 ID 抓取（最小化 / 锁屏 / 特殊窗口）时退回屏幕区域截图
+              a.push('--rect', `${w.x},${w.y},${w.width},${w.height}`)
+            }
           }
-          a.push('--out', file)                         // 放最后：万一碰上旧引擎（拿最后一个参数当输出路径）也只会写进私有目录
-          const rect = parseRect(await run(a, 60000))
-          if (!rect) throw new Error('dsh-cu shot 没回截图范围：命令行引擎太旧，重新跑一遍 install.sh')
+          if (!rect) {
+            a.push('--out', file)                       // 放最后：万一碰上旧引擎（拿最后一个参数当输出路径）也只会写进私有目录
+            rect = parseRect(await run(a, 60000))
+            if (!rect) throw new Error('dsh-cu shot 没回截图范围：命令行引擎太旧，重新跑一遍 install.sh')
+          }
           let buf = fs.readFileSync(file)
           let k = 1
           if (maxWidth && maxWidth < rect.width && buf.length > 200_000) {
