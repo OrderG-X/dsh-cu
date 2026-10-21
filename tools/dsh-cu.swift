@@ -28,9 +28,11 @@
 //   dsh-cu drag <pid> <x1> <y1> <x2> <y2> [--no-cursor]   拖拽（会联动浮层光标）
 //   dsh-cu apps                             列出运行中的应用（* = 前台）
 //   dsh-cu launch <bundleId|应用名>          后台启动应用（不抢前台；应用名可以是本地化名，如「计算器」）
-//   dsh-cu shot [--out 路径] [--rect x,y,w,h | --pid N]  截屏（默认主屏）。按「点」出图：
-//                                      图上 (u,v) = 屏幕 (rect.x+u, rect.y+v)，第二行输出 rect
+//   dsh-cu shot [--out 路径] [--rect x,y,w,h | --pid N | --window 窗口号]  截屏（默认主屏）。按「点」出图：
+//                                      图上 (u,v) = 屏幕 (rect.x+u, rect.y+v)，第二行输出 rect。
+//                                      --pid / --window 按窗口号截窗口本身（被别的窗口挡住也行），截不到再按屏幕区域截
 //   dsh-cu version                     协议版本号（插件先核对它，对不上就要重跑 install.sh）
+//   dsh-cu features                    协议号不变的增强（一行一个）。插件据此提示「引擎可以更新」，不拦着用
 //
 // 点击 / 输入 / 按键 / 滚动 / 拖拽 / observe 要辅助功能权限（没有它系统会静默丢掉合成事件），没有就直接报错。
 
@@ -179,6 +181,10 @@ switch cmd {
 
 case "version":
     print(ENGINE_PROTOCOL)
+
+case "features":
+    // window-shot：observe / find --pid / shot --pid 按窗口号截窗口本身
+    print("window-shot")
 
 case "winlist":
     // CGWindowList：不依赖 AX，拿得到 pid / 标题 / 精确 bounds / 层级
@@ -333,8 +339,8 @@ case "find":
         shots = [(cg, CGRect(x: 0, y: 0, width: cg.width, height: cg.height))]
     } else if let p = argValue("--pid") {
         guard let pid = pid_t(p) else { fail("--pid 要是数字") }
-        guard let w = windowsOf(pid).first else { fail("pid \(pid) 没有可见窗口") }
-        shots = [capture(w)]                    // 只截窗口所在那块屏、只认窗口里的字
+        guard let w = windowInfosOf(pid).first else { fail(noWindow(pid)) }
+        shots = [captureWindow(w)]              // 只截这个窗口（被挡住也是它自己）、只认窗口里的字
     } else {
         shots = displays().map { capture($0) }          // 每块屏都找
         if shots.isEmpty { fail("找不到显示器") }
@@ -385,8 +391,14 @@ case "observe":
     let marks = interactiveElements(in: win, limit: maxMark)
     if marks.isEmpty { fail("这个窗口里没找到可交互元素") }
 
-    // 截窗口：按窗口所在那块屏的原点和缩放比裁（Retina / 副屏 / 负坐标都对），出图按「点」尺寸
-    let (shot, covered) = capture(winFrame)
+    // 截窗口本身（被别的窗口挡住也行）：AX 窗口按位置大小对上 CGWindowList 里的窗口号；对不上就按屏幕区域截
+    // （按窗口所在那块屏的原点和缩放比裁，Retina / 副屏 / 负坐标都对）。出图按「点」尺寸
+    let near = { (a: CGFloat, b: CGFloat) in abs(a - b) < 2 }
+    let cgWin = windowInfosOf(pid).first {
+        near($0.rect.minX, winFrame.minX) && near($0.rect.minY, winFrame.minY) &&
+        near($0.rect.width, winFrame.width) && near($0.rect.height, winFrame.height)
+    }
+    let (shot, covered) = cgWin.map { captureWindow($0) } ?? capture(winFrame)
     let W = max(1, Int(covered.width.rounded())), H = max(1, Int(covered.height.rounded()))
     let scale = CGFloat(W) / covered.width
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: W, pixelsHigh: H, bitsPerSample: 8, samplesPerPixel: 4,
@@ -581,15 +593,20 @@ case "launch":
 case "shot":
     let out = argValue("--out") ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("dsh-cu-shot.png")
     var rect: CGRect? = nil                     // nil = 整个主屏
+    var win: (id: CGWindowID, rect: CGRect)? = nil   // 给了 --pid / --window 就截这个窗口本身
     if let r = argValue("--rect") {
         let n = r.split(separator: ",").compactMap { Double($0) }
         guard n.count == 4, n[2] > 0, n[3] > 0 else { fail("--rect 要写成 x,y,宽,高（屏幕点），收到的是「\(r)」") }
         rect = CGRect(x: n[0], y: n[1], width: n[2], height: n[3])
     } else if let p = argValue("--pid") {
-        guard let pid = pid_t(p), let w = windowsOf(pid).first else { fail("pid \(p) 没有可见窗口") }
-        rect = w
+        guard let pid = pid_t(p) else { fail("--pid 要是数字") }
+        guard let w = windowInfosOf(pid).first else { fail(noWindow(pid)) }
+        win = w
+    } else if let v = argValue("--window") {
+        guard let id = CGWindowID(v), let w = windowInfo(id) else { fail("窗口 \(v) 不在屏幕上（关掉了、最小化了，或在别的桌面空间）") }
+        win = w
     }
-    let (img, covered) = capture(rect)
+    let (img, covered) = win.map { captureWindow($0) } ?? capture(rect)
     // 缩回「点」尺寸：图上 1 像素 = 屏幕 1 点，图上坐标加上 rect 原点就是点击坐标
     writePNG(img, to: out, size: covered.size)
     print(out)
@@ -605,15 +622,32 @@ func windowsOfAX(_ pid: pid_t) -> [AXUIElement] {
     return (attr(ax, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
 }
 
-/// 某个 pid 最前面那个普通窗口的屏幕矩形（CGWindowList，不需要 AX）
-func windowsOf(_ pid: pid_t) -> [CGRect] {
+/// 某个 pid 的普通窗口，前面的在前：窗口号 + 屏幕矩形（CGWindowList，不需要 AX）。
+/// 只有当前屏幕上看得到的：最小化的、在别的桌面空间的不在里面
+func windowInfosOf(_ pid: pid_t) -> [(id: CGWindowID, rect: CGRect)] {
     let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
     return info.compactMap { w in
         guard (w[kCGWindowLayer as String] as? Int ?? -1) == 0,
-              (w[kCGWindowOwnerPID as String] as? Int) == Int(pid),
-              let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
-        return CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+              (w[kCGWindowOwnerPID as String] as? Int) == Int(pid) else { return nil }
+        return cgWindow(w)
     }
+}
+
+/// 按窗口号找一个在屏幕上的普通窗口
+func windowInfo(_ id: CGWindowID) -> (id: CGWindowID, rect: CGRect)? {
+    let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]] ?? []
+    guard let w = info.first, (w[kCGWindowIsOnscreen as String] as? Bool) == true else { return nil }
+    return cgWindow(w)
+}
+
+func cgWindow(_ w: [String: Any]) -> (id: CGWindowID, rect: CGRect)? {
+    guard let n = w[kCGWindowNumber as String] as? Int,
+          let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
+    return (CGWindowID(n), CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0))
+}
+
+func noWindow(_ pid: pid_t) -> String {
+    "pid \(pid) 没有可见窗口（应用没开窗口、窗口最小化了，或在别的桌面空间）"
 }
 
 /// 按名字找应用：先认文件名，再认各语言的本地化名（「计算器」→ Calculator.app）
@@ -691,12 +725,12 @@ func fits(_ img: CGImage, _ r: CGRect) -> Bool {
 }
 
 /// 跑一次 screencapture（-x 不出声），把图读进内存；失败回 nil 和原因
-func screencapture(_ opt: String) -> (image: CGImage?, error: String) {
+func screencapture(_ opts: String...) -> (image: CGImage?, error: String) {
     let tmp = privateTemp("shot-\(UUID().uuidString.prefix(8)).png")
     defer { try? FileManager.default.removeItem(atPath: tmp) }
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-    p.arguments = ["-x", opt, tmp]
+    p.arguments = ["-x"] + opts + [tmp]
     p.standardOutput = FileHandle.nullDevice
     let errPipe = Pipe()
     p.standardError = errPipe
@@ -708,7 +742,7 @@ func screencapture(_ opt: String) -> (image: CGImage?, error: String) {
     guard p.terminationStatus == 0, let data = FileManager.default.contents(atPath: tmp),
           let src = CGImageSourceCreateWithData(data as CFData, nil),
           let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-        return (nil, "screencapture \(opt) 退出码 \(p.terminationStatus)\(errText.isEmpty ? "" : "：\(errText)")")
+        return (nil, "screencapture \(opts.joined(separator: " ")) 退出码 \(p.terminationStatus)\(errText.isEmpty ? "" : "：\(errText)")")
     }
     return (img, "")
 }
@@ -732,6 +766,15 @@ func capture(_ rect: CGRect?) -> (image: CGImage, covered: CGRect) {
         return (cropped, t.want)
     }
     fail("截图失败（\(shot.error)）。多半是 DSH 没有屏幕录制权限，或屏幕锁着")
+}
+
+/// 截窗口本身（-l 窗口号，-o 不带阴影）：被别的窗口挡住、在后台都截得到它自己，出图覆盖的就是窗口矩形。
+/// 截不到（窗口刚关、特殊窗口）或尺寸对不上，就退回按屏幕区域截
+func captureWindow(_ w: (id: CGWindowID, rect: CGRect)) -> (image: CGImage, covered: CGRect) {
+    if w.rect.width >= 1, w.rect.height >= 1, let img = screencapture("-o", "-l\(w.id)").image, fits(img, w.rect) {
+        return (img, w.rect)
+    }
+    return capture(w.rect)
 }
 
 /// 全局点矩形 → 那块屏截图里的像素矩形：先减屏幕原点，再乘这块屏的缩放比

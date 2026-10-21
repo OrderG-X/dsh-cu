@@ -17,6 +17,12 @@ const CANDIDATES = [
 
 export const INSTALL_CMD = 'git clone https://github.com/OrderG-X/dsh-mac-computer-use.git && cd dsh-mac-computer-use && ./install.sh'
 
+/** 引擎更新：在家目录拉（或更新）一份源码再重装。之前在别处 clone 过也没关系，装的都是 ~/.dsh/bin */
+export const UPDATE_CMD = 'cd ~ && { [ -d dsh-mac-computer-use ] || git clone https://github.com/OrderG-X/dsh-mac-computer-use.git; } && cd dsh-mac-computer-use && git pull --ff-only && ./install.sh'
+
+/** 协议号不变的引擎增强（dsh-cu features）。缺了不拦着用，只在设置页提示「引擎可以更新」 */
+export const ENGINE_FEATURES = ['window-shot']
+
 /** 找不到二进制时的报错：必须自带公开安装步骤，不能只有本机才看得懂的路径提示。 */
 export const INSTALL_HINT = [
   'dsh-cu 还没装（一次性前置，装完不用再管）：',

@@ -136,9 +136,12 @@ const typedLabel = (text) => {
 const ENGINE_PROTOCOL = '2'
 let engineOk = ''                                         // 核对通过的引擎（路径 + 修改时间 + 大小），重装后自动重新核对
 
+function engineKey(bin) {
+  try { const st = fs.statSync(bin); return `${bin}:${st.mtimeMs}:${st.size}` } catch { return bin }
+}
+
 async function checkEngine(bin) {
-  let key = bin
-  try { const st = fs.statSync(bin); key = `${bin}:${st.mtimeMs}:${st.size}` } catch {}
+  const key = engineKey(bin)
   if (key === engineOk) return
   const got = await exec(bin, ['version'], 10000).catch(() => '')
   if (got !== ENGINE_PROTOCOL) {
@@ -147,6 +150,46 @@ async function checkEngine(bin) {
       `请在 dsh-mac-computer-use 仓库根目录重跑 ./install.sh，再重试（没有仓库就重新装：${INSTALL_CMD}）`)
   }
   engineOk = key
+}
+
+/** 协议号不变的引擎增强（dsh-cu features）；旧引擎没这个命令就是空集合。按引擎文件缓存，重装后重新问 */
+let featureCache = { key: '', set: new Set() }
+async function engineFeatures() {
+  const bin = cuBin()
+  const key = engineKey(bin)
+  if (key !== featureCache.key) {
+    const out = await exec(bin, ['features'], 10000).catch(() => '')
+    featureCache = { key, set: new Set(out.split('\n').map((l) => l.trim()).filter(Boolean)) }
+  }
+  return featureCache.set
+}
+
+/** 跑系统自带的小工具（screencapture / sips），不卡住 DSH */
+function execFileP(cmd, args, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: timeoutMs }, (err, out) => (err ? reject(err) : resolve(String(out))))
+  })
+}
+
+/**
+ * 旧引擎（没重跑 install.sh，没有 shot --window）时插件自己截窗口本身：screencapture -l 窗口号，缩到「点」尺寸，
+ * 坐标换算跟引擎一样「1 像素 = 1 点」。截不到、或出图比例对不上（同引擎的 fits）回 null，调用方退回按屏幕区域截
+ */
+async function shootWindow(w, file) {
+  try {
+    await execFileP('/usr/sbin/screencapture', ['-x', '-o', '-l', String(w.windowId), file])
+    const dims = await execFileP('/usr/bin/sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', file])
+    const pw = Number((/pixelWidth:\s*(\d+)/.exec(dims) || [])[1])
+    const ph = Number((/pixelHeight:\s*(\d+)/.exec(dims) || [])[1])
+    const sx = pw / w.width, sy = ph / w.height
+    if (!(sx >= 0.5 && Math.abs(sx - sy) < 0.05)) return null
+    if (pw !== w.width || ph !== w.height) {
+      await execFileP('/usr/bin/sips', ['-z', String(w.height), String(w.width), file, '--out', file])
+    }
+    return { x: w.x, y: w.y, width: w.width, height: w.height }
+  } catch {
+    return null
+  }
 }
 
 async function run(args, timeoutMs = 30000) {
@@ -301,7 +344,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'desktop_screenshot',
       description:
-        '给屏幕或某个窗口截图，图片直接返回给你看。给了 pid 就只截那个应用最前面的窗口（在哪块屏都行），' +
+        '给屏幕或某个窗口截图，图片直接返回给你看。给了 pid 就只截那个应用最前面的窗口（在哪块屏都行，被别的窗口挡住也截得到它本身），' +
         '否则截主显示器。图按「点」出（1 像素 = 1 点）：全屏图上的坐标就是屏幕坐标；窗口图的换算方式写在返回文字里。' +
         '**先截图、看清按钮位置，再用 desktop_click 按坐标点** —— 这是推荐的工作方式。',
       parameters: {
@@ -333,18 +376,16 @@ export function apply(ctx, config) {
           let rect = null
           if (args.pid) {
             const wins = parseWindows(await run(['winlist'])).filter((w) => w.pid === Number(args.pid))
-            if (!wins.length) throw new Error(`pid ${args.pid} 没有可见窗口`)
+            if (!wins.length) throw new Error(`pid ${args.pid} 没有可见窗口（应用没开窗口、窗口最小化了，或在别的桌面空间）`)
             const w = wins[0]
             target = `${w.app} «${w.title}»`
-            // 优先按 CGWindowID 直接抓窗口：被遮挡、在别的 Space 也能拿到目标窗口本身；
-            // 图缩放到窗口的点尺寸，保持「1 像素 = 1 点」的坐标换算。
-            try {
-              execFileSync('/usr/sbin/screencapture', ['-x', '-o', '-l', String(w.windowId), file], { stdio: 'ignore' })
-              execFileSync('/usr/bin/sips', ['-z', String(w.height), String(w.width), file, '--out', file], { stdio: 'ignore' })
-              rect = { x: w.x, y: w.y, width: w.width, height: w.height }
-            } catch {
-              // 窗口无法按 ID 抓取（最小化 / 锁屏 / 特殊窗口）时退回屏幕区域截图
-              a.push('--rect', `${w.x},${w.y},${w.width},${w.height}`)
+            if ((await engineFeatures()).has('window-shot')) {
+              // 引擎按窗口号截窗口本身（被别的窗口挡住也行），截不到自己退回按屏幕区域截
+              a.push('--window', String(w.windowId))
+            } else {
+              // 旧引擎：插件自己按窗口号截；不行再让引擎按窗口所在那块屏的原点和缩放比裁（Retina / 副屏 / 负坐标都对）
+              rect = await shootWindow(w, file)
+              if (!rect) a.push('--rect', `${w.x},${w.y},${w.width},${w.height}`)
             }
           }
           if (!rect) {

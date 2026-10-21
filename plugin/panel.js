@@ -2,7 +2,7 @@
  * DSH 插件页里那张设置卡的后端：一条 HTTP 路由，挂在 DSH 自己的 webServer 上。
  *
  *   GET  /dsh-mac-computer-use/panel           → 状态（命令行工具、光标浮层、两项系统权限、看得到几个窗口、光标开关）
- *   POST /dsh-mac-computer-use/panel {action}  → cursor / copyInstall / openSettings，回新状态
+ *   POST /dsh-mac-computer-use/panel {action}  → cursor / copyInstall / copyUpdate / openSettings，回新状态
  *
  * 页面（client.js）跑在 DSH 的网页端，只能走 HTTP。webServer 本身不做鉴权，
  * 而浏览器里随便哪个网页都摸得到 127.0.0.1，所以自己把门：只收本机连接、Host 必须是本机名、
@@ -12,7 +12,7 @@
 import { execFile, execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import {
-  findBin, overlayState, stopOverlay, permissions, readConfig, writeConfig, INSTALL_CMD, SETTINGS_PANES,
+  findBin, overlayState, stopOverlay, permissions, readConfig, writeConfig, INSTALL_CMD, UPDATE_CMD, ENGINE_FEATURES, SETTINGS_PANES,
 } from './setup.js'
 
 export const PANEL_ROUTE = '/dsh-mac-computer-use/panel'
@@ -33,12 +33,24 @@ function countWindows(bin) {
   })
 }
 
+/** 引擎支持的增强（dsh-cu features，一行一个）。旧引擎没这个命令，回空集合 */
+function engineFeatures(bin) {
+  return new Promise((resolve) => {
+    execFile(bin, ['features'], { timeout: 5000 }, (err, out) => {
+      resolve(new Set(err ? [] : String(out).split('\n').map((l) => l.trim()).filter(Boolean)))
+    })
+  })
+}
+
 export async function panelState() {
-  const base = { plugin: PKG_VERSION, platform: process.platform, showCursor: readConfig().showCursor !== false, installCmd: INSTALL_CMD }
+  const base = { plugin: PKG_VERSION, platform: process.platform, showCursor: readConfig().showCursor !== false, installCmd: INSTALL_CMD, updateCmd: UPDATE_CMD }
   if (process.platform !== 'darwin') return base
   const bin = findBin()
-  const [perms, windows] = await Promise.all([permissions(), bin ? countWindows(bin.path) : null])
-  return { ...base, bin: bin && { source: bin.source }, overlay: overlayState(), perms, windows }
+  const [perms, windows, features] = await Promise.all([
+    permissions(), bin ? countWindows(bin.path) : null, bin ? engineFeatures(bin.path) : new Set(),
+  ])
+  const outdated = ENGINE_FEATURES.some((f) => !features.has(f))
+  return { ...base, bin: bin && { source: bin.source, outdated }, overlay: overlayState(), perms, windows }
 }
 
 /** 跨站请求一律拒：没带 Origin（同源 GET、curl）放行；带了就必须是 DSH 自己。 */
@@ -104,6 +116,10 @@ export function panelHandler({ origin, trace = () => {} }) {
           break
         case 'copyInstall':
           execFileSync('/usr/bin/pbcopy', [], { input: INSTALL_CMD })
+          extra.copied = true
+          break
+        case 'copyUpdate':
+          execFileSync('/usr/bin/pbcopy', [], { input: UPDATE_CMD })
           extra.copied = true
           break
         case 'openSettings': {

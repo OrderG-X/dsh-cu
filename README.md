@@ -93,7 +93,7 @@ DSH 工具 (desktop_*)
 dsh-cu (Swift 单文件)
       ├── winlist   CGWindowListCopyWindowInfo   ← 窗口坐标，零权限
       ├── observe   AX 枚举可点元素 + 截图标注编号
-      ├── shot      screencapture
+      ├── shot      screencapture -l 窗口号       ← 截窗口本身，被挡住也行
       ├── find      Vision 框架 OCR              ← 找文字 → 可点坐标
       ├── clickat   CGEvent postToPid            ← 不移动真实鼠标、不抢前台
       ├── type/key  CGEvent                      ← 支持中文
@@ -102,6 +102,8 @@ dsh-cu (Swift 单文件)
 ```
 
 后台点击能落进窗口，靠的是两处细节：鼠标事件里填上目标窗口号和窗口内坐标（不填的话 AppKit 和 Electron 都会把事件丢掉）；目标是后台的 Chromium / Electron 窗口（比如 DSH 自己）时，按下那一下带上 ⌘，页面才肯接，松开和 click 本身不带，页面看到的就是普通点击。
+
+截某个应用的窗口时，按窗口号截它本身（`screencapture -l`）：被别的窗口挡住、在后台都截得到，看到的就是要点的那个窗口；截不到再退回按屏幕区域截。截图、给元素编号、按文字找都是这样（感谢 [@Golden-Pigeon](https://github.com/Golden-Pigeon) 的 PR）。
 
 后台打字同理：先用辅助功能把目标窗口设成它自己的主窗口（不激活应用、不抢前台），按键才有去处；Chromium / Electron 在后台一个按键只收一个字，所以对它们逐字发。后台应用收不到全选、复制、粘贴这类走菜单的 ⌘ 快捷键。
 
@@ -145,6 +147,7 @@ dsh-cu selftest                   # 全链路自检（见 tools/selftest.sh）
 ## 已知限制
 
 - **锁屏时**：截图只有壁纸、窗口不渲染、AX 读不到窗口 —— 这是 macOS 的行为，不是工具的问题
+- **最小化的窗口、在别的桌面空间（Space）里的窗口**：看不到也操作不了，先把它放回当前桌面
 - `desktop_click` 默认投递给目标进程（`postToPid`）。个别应用不响应投递事件，加 `global: true` 走系统事件兜底（会移动真实鼠标）
 - **桌面点击驱动不了 Chrome** —— Chrome 不理会投递的合成事件。操作浏览器请用 CDP 类工具（比如 [dsh-chrome-bridge](https://github.com/OrderG-X/dsh-chrome-bridge)）
 - 需要**屏幕录制**权限（`screencapture` 用）和**辅助功能**权限（点击、输入、按键、滚动、拖拽用；没开时系统会静默丢掉这些事件，所以工具会直接报错，不会假装成功）

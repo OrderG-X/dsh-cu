@@ -53,6 +53,10 @@ window.__ModuleLoader__.load({
       srcEnv: 'DSH_CU_BIN',
       copyInstall: '复制安装命令',
       copied: '安装命令已复制，到「终端」里粘贴回车，装完回来这里会自动更新',
+      binOld: '可以更新',
+      binOutdated: '新版引擎截图更准：窗口被别的窗口挡住时，给元素编号、按文字找也能看到窗口本身。在「终端」里运行下面这条更新（现在的也能用）：',
+      copyUpdate: '复制更新命令',
+      updateCopied: '更新命令已复制，到「终端」里粘贴回车，装完回来这里会自动更新',
       screenTitle: '屏幕录制权限',
       screenHint: '截图、按文字找按钮都要用。',
       axTitle: '辅助功能权限',
@@ -92,6 +96,10 @@ window.__ModuleLoader__.load({
       srcEnv: 'DSH_CU_BIN',
       copyInstall: 'Copy install command',
       copied: 'Install command copied. Paste it in Terminal; this page updates by itself once it is done',
+      binOld: 'Update available',
+      binOutdated: 'The newer engine captures windows more accurately: numbering elements and finding text also see the window itself when another window covers it. Run this in Terminal to update (the current one still works):',
+      copyUpdate: 'Copy update command',
+      updateCopied: 'Update command copied. Paste it in Terminal; this page updates by itself once it is done',
       screenTitle: 'Screen Recording permission',
       screenHint: 'Needed for screenshots and finding buttons by their text.',
       axTitle: 'Accessibility permission',
@@ -264,7 +272,11 @@ window.__ModuleLoader__.load({
         value === false ? h(Btn, { disabled: busy, onClick: () => run({ action: 'openSettings', pane: key }, t('settingsOpened')) }, t('openSettings')) : null)
 
       const checklist = state && state.platform === 'darwin' ? h('div', { className: 'dcu-card' },
-        state.bin
+        state.bin && state.bin.outdated
+          ? item('bin', 'warn', t('binTitle'), t('binOld'),
+            h('div', null, h('p', { className: 'dcu-hint' }, t('binOutdated')), h('div', { className: 'dcu-cmd' }, state.updateCmd)),
+            h(Btn, { disabled: busy, onClick: () => run({ action: 'copyUpdate' }, t('updateCopied')) }, t('copyUpdate')))
+          : state.bin
           ? item('bin', 'on', t('binTitle'), t('binOk') + ' · ' + t({ installed: 'srcInstalled', dev: 'srcDev', env: 'srcEnv' }[state.bin.source] || 'srcInstalled'))
           : item('bin', 'off', t('binTitle'), null,
             h('div', null, h('p', { className: 'dcu-hint' }, t('binMissing')), h('div', { className: 'dcu-cmd' }, state.installCmd)),
