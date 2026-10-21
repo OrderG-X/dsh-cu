@@ -1,7 +1,8 @@
 // DSH 桌面光标浮层 —— 点击穿透、不激活应用、永远置顶
 //
 // 用法：
-//   dsh-cursor-overlay [--fifo /tmp/dsh-cursor.fifo] [--size 26] [--idle 60]
+//   dsh-cursor-overlay [--fifo 路径] [--size 26] [--idle 60]
+//   FIFO 默认在本用户私有临时目录：$(getconf DARWIN_USER_TEMP_DIR)dsh-cursor.fifo（别的账号占不了；插件、dsh-cu 同一个算法）
 // 控制（往 FIFO 写一行）：
 //   show <x> <y>     立即显示到屏幕坐标 (x,y)（Quartz 全局坐标，左上原点）
 //   move <x> <y>     平滑移动到 (x,y)
@@ -40,7 +41,11 @@ func argValue(_ name: String, _ fallback: String) -> String {
     return fallback
 }
 
-let fifoPath = argValue("--fifo", "/tmp/dsh-cursor.fifo")
+let fifoPath = argValue("--fifo", {
+    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+    let dir = confstr(_CS_DARWIN_USER_TEMP_DIR, &buf, buf.count) > 0 ? String(cString: buf) : NSTemporaryDirectory()
+    return (dir as NSString).appendingPathComponent("dsh-cursor.fifo")
+}())
 /// 箭头画在 size×size 的方框里（跟浏览器的 26px 一样）
 let cursorSize = CGFloat(Double(argValue("--size", "26")) ?? 26)
 // 空闲多久自己退出（秒）。不留常驻进程吃内存 —— 下次要用会被重新拉起。

@@ -11,7 +11,7 @@
 
 </div>
 
-**给 DSH 的 Mac 桌面操作能力（computer use）。视觉优先，不依赖无障碍权限。**
+**给 DSH 的 Mac 桌面操作能力（computer use）。视觉优先，不依赖无障碍树。**
 
 > 以前叫 `dsh-cu`，2026-10-18 改名。旧地址会自动跳到这里；底层的命令行引擎仍叫 `dsh-cu`。
 > 和别人家的 [dsh-computer-use](https://github.com/988hj7tczd-oss/dsh-computer-use) 不是一个东西：那个靠无障碍树（cua-driver），这个靠截图。
@@ -101,6 +101,10 @@ dsh-cu (Swift 单文件)
       └── launch    NSWorkspace（后台启动，不抢前台）
 ```
 
+后台点击能落进窗口，靠的是两处细节：鼠标事件里填上目标窗口号和窗口内坐标（不填的话 AppKit 和 Electron 都会把事件丢掉）；目标是后台的 Chromium / Electron 窗口（比如 DSH 自己）时，按下那一下带上 ⌘，页面才肯接，松开和 click 本身不带，页面看到的就是普通点击。
+
+后台打字同理：先用辅助功能把目标窗口设成它自己的主窗口（不激活应用、不抢前台），按键才有去处；Chromium / Electron 在后台一个按键只收一个字，所以对它们逐字发。后台应用收不到全选、复制、粘贴这类走菜单的 ⌘ 快捷键。
+
 命令行也能单独用：
 
 ```bash
@@ -134,7 +138,7 @@ dsh-cu selftest                   # 全链路自检（见 tools/selftest.sh）
 - 拖拽时按住（缩一点 + 尖端一圈光晕）跟着走；滚动时右上角亮一下方向
 - 闲 6 秒变淡、名牌收起，不挡视线；系统开了「减少动态效果」就不做动画
 
-浮层指令（往 `/tmp/dsh-cursor.fifo` 写一行）：`show x y` / `move x y` / `click [n]` / `down` / `up` / `scroll ±1` / `label 文字` / `hide` / `ping`。
+浮层指令（往 `$(getconf DARWIN_USER_TEMP_DIR)dsh-cursor.fifo` 写一行，每个账号各自一个）：`show x y` / `move x y` / `click [n]` / `down` / `up` / `scroll ±1` / `label 文字` / `hide` / `ping`。
 
 ---
 
@@ -143,7 +147,7 @@ dsh-cu selftest                   # 全链路自检（见 tools/selftest.sh）
 - **锁屏时**：截图只有壁纸、窗口不渲染、AX 读不到窗口 —— 这是 macOS 的行为，不是工具的问题
 - `desktop_click` 默认投递给目标进程（`postToPid`）。个别应用不响应投递事件，加 `global: true` 走系统事件兜底（会移动真实鼠标）
 - **桌面点击驱动不了 Chrome** —— Chrome 不理会投递的合成事件。操作浏览器请用 CDP 类工具（比如 [dsh-chrome-bridge](https://github.com/OrderG-X/dsh-chrome-bridge)）
-- 需要**屏幕录制**权限（`screencapture` 用）
+- 需要**屏幕录制**权限（`screencapture` 用）和**辅助功能**权限（点击、输入、按键、滚动、拖拽用；没开时系统会静默丢掉这些事件，所以工具会直接报错，不会假装成功）
 
 ---
 

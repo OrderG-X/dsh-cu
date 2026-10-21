@@ -14,12 +14,12 @@
  * 本机环境（命令行在哪、权限、用户设置）在 setup.js；DSH 设置页的后端在 panel.js、前端在 client.js。
  */
 
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, execFile, execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { findBin, INSTALL_HINT, OVERLAY, readConfig } from './setup.js'
+import { findBin, INSTALL_CMD, INSTALL_HINT, OVERLAY, readConfig } from './setup.js'
 import { PANEL_ROUTE, panelHandler } from './panel.js'
 
 export const name = 'dsh-mac-computer-use'
@@ -42,12 +42,15 @@ function cuBin() {
 // 不需要开机常驻，用户零操作。DSH 设置页里关掉「显示光标」就不起、也不让命令行去起。
 // 浮层闲 60 秒会自己退出，所以每次都探一下：FIFO 能以非阻塞方式打开 = 有读者 = 浮层活着。
 
-const FIFO = '/tmp/dsh-cursor.fifo'
+// 本用户私有临时目录（0700）下，别的账号占不了也读不到；dsh-cu 和浮层用同一个算法（confstr DARWIN_USER_TEMP_DIR）
+const FIFO = (() => { try { return path.join(execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim(), 'dsh-cursor.fifo') } catch { return path.join(os.tmpdir(), 'dsh-cursor.fifo') } })()
 // 浮层拉不起来（比如二进制坏了）就歇 5 分钟再试，别让每次桌面操作都白等
 let cursorFailedAt = 0
-const nap = new Int32Array(new SharedArrayBuffer(4))
+// 正在拉起浮层的那一次：并发的工具调用一起等它，别起两个
+let cursorStarting = null
 
 const cursorOn = () => readConfig().showCursor !== false
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function fifoOpen() {
   try {
@@ -56,21 +59,31 @@ function fifoOpen() {
   } catch { return -1 }                                  // 没文件 / 没读者（ENXIO）
 }
 
+/** 只认当前账号的浮层：别的账号开着浮层不算（否则每次操作都白等它的 FIFO） */
 function overlayRunning() {
-  try { execFileSync('/usr/bin/pgrep', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' }); return true } catch { return false }
+  return new Promise((resolve) => {
+    execFile('/usr/bin/pgrep', ['-U', String(process.getuid()), '-f', 'dsh-cursor-overlay'], (err) => resolve(!err))
+  })
 }
 
+/** 异步等浮层就绪：DSH 宿主是单线程，绝不能同步睡（以前用 Atomics.wait，会把整个 DSH 卡住最多 2 秒） */
 function ensureCursor() {
-  if (!cursorOn()) return
+  if (!cursorOn()) return Promise.resolve()
+  if (!cursorStarting) cursorStarting = startCursor().finally(() => { cursorStarting = null })
+  return cursorStarting
+}
+
+async function startCursor() {
   const fd = fifoOpen()
   if (fd >= 0) { fs.closeSync(fd); return }
   // 进程在、FIFO 还没好 = 刚起（刚装好的二进制第一次启动 macOS 要验一下，会慢一点）：等它，别再起第二个
-  const running = overlayRunning()
+  const running = await overlayRunning()
   if (!running) {
     if (Date.now() - cursorFailedAt < 5 * 60_000) return
     try {
       fs.accessSync(OVERLAY, fs.constants.X_OK)
-      const child = spawn(OVERLAY, [], { detached: true, stdio: 'ignore' })
+      // FIFO 明着传：旧版浮层默认还是 /tmp 下那个公用路径
+      const child = spawn(OVERLAY, ['--fifo', FIFO], { detached: true, stdio: 'ignore' })
       child.unref()
     } catch (e) {
       cursorFailedAt = Date.now()
@@ -80,7 +93,7 @@ function ensureCursor() {
   }
   // 等浮层把 FIFO 读端打开（最多 2 秒），否则这一次的光标指令会落空
   for (let i = 0; i < 40; i++) {
-    Atomics.wait(nap, 0, 0, 50)                           // 同步睡 50ms，不用每次起个 sleep 进程
+    await sleep(50)
     const f = fifoOpen()
     if (f >= 0) {
       fs.closeSync(f)
@@ -89,7 +102,7 @@ function ensureCursor() {
       return
     }
   }
-  if (!overlayRunning()) {
+  if (!(await overlayRunning())) {
     cursorFailedAt = Date.now()
     trace('光标浮层起不来：拉起后 2 秒内没见到它（不影响操作，只是看不见光标；5 分钟后再试）')
   }
@@ -116,9 +129,35 @@ const typedLabel = (text) => {
   return /\s|[\u3000-\u9fff\uac00-\ud7af]/.test(t) ? `输入「${short(t, 12)}」` : `输入 ${t.length} 个字符`
 }
 
-function run(args, timeoutMs = 30000) {
+/**
+ * 跟引擎约定的协议版本（tools/dsh-cu.swift 的 ENGINE_PROTOCOL）。插件跟着 DSH 自动更新，引擎要手动重跑 install.sh，
+ * 两边可能对不上：旧引擎会把新参数当成输出路径、按旧单位滚动。所以第一次用引擎先核对，对不上就什么都不跑。
+ */
+const ENGINE_PROTOCOL = '2'
+let engineOk = ''                                         // 核对通过的引擎（路径 + 修改时间 + 大小），重装后自动重新核对
+
+async function checkEngine(bin) {
+  let key = bin
+  try { const st = fs.statSync(bin); key = `${bin}:${st.mtimeMs}:${st.size}` } catch {}
+  if (key === engineOk) return
+  const got = await exec(bin, ['version'], 10000).catch(() => '')
+  if (got !== ENGINE_PROTOCOL) {
+    throw new Error(
+      `命令行引擎版本不对（插件要 ${ENGINE_PROTOCOL}，引擎${got ? `是 ${got.slice(0, 20)}` : '太旧、没有 version 命令'}），这次什么都没做。` +
+      `请在 dsh-mac-computer-use 仓库根目录重跑 ./install.sh，再重试（没有仓库就重新装：${INSTALL_CMD}）`)
+  }
+  engineOk = key
+}
+
+async function run(args, timeoutMs = 30000) {
+  const bin = cuBin()
+  await checkEngine(bin)
+  return exec(bin, args, timeoutMs)
+}
+
+function exec(bin, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cuBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let out = '', err = ''
     const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} ; reject(new Error(`dsh-cu 超时（${timeoutMs}ms）`)) }, timeoutMs)
     child.stdout.on('data', (d) => { out += d })
@@ -126,8 +165,10 @@ function run(args, timeoutMs = 30000) {
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`起不来 dsh-cu: ${e.message}`)) })
     child.on('close', (code) => {
       clearTimeout(timer)
-      if (code === 0) resolve(out.trim())
-      else reject(new Error(err.trim() || `dsh-cu 退出码 ${code}`))
+      if (code === 0) return resolve(out.trim())
+      const e = new Error(err.trim() || out.trim() || `dsh-cu 退出码 ${code}`)
+      e.exitCode = code                                   // 调用方按退出码区分（find 的 2 = 没找到）
+      reject(e)
     })
   })
 }
@@ -177,7 +218,11 @@ async function findText(text, pid) {
   try {
     out = await run(a, 60000)
   } catch (e) {
-    throw new Error(`没在屏幕上找到「${text}」${pid ? `（窗口 pid=${pid}）` : ''}。先 desktop_screenshot 看一眼现在是什么界面`)
+    // 只有退出码 2 才是「没找到」；没装、超时、没权限、截图失败都原样报，别都说成没找到
+    if (e.exitCode === 2) {
+      throw new Error(`没在屏幕上找到「${text}」${pid ? `（窗口 pid=${pid}）` : ''}。先 desktop_screenshot 看一眼现在是什么界面`)
+    }
+    throw new Error(`OCR 找字没做成：${e.message}`)
   }
   const line = out.split('\n')[0]
   const [idx, xy, conf, ...rest] = line.split('\t')
@@ -186,10 +231,38 @@ async function findText(text, pid) {
   return { x, y, conf: conf || '?', text: rest.join('\t') || text }
 }
 
+// 「x,y w×h」：副屏在主屏左边 / 上边时 x、y 是负数
+const RECT_RE = /(-?\d+),(-?\d+) (\d+)×(\d+)/
+
+/** dsh-cu shot 输出的第二行「rect\tx,y w×h」：截图覆盖的屏幕范围（点） */
+function parseRect(raw) {
+  const m = RECT_RE.exec(raw.split('\n').find((l) => l.startsWith('rect\t')) || '')
+  return m ? { x: Number(m[1]), y: Number(m[2]), width: Number(m[3]), height: Number(m[4]) } : null
+}
+
+/** 告诉模型图上坐标怎么换成点击坐标。图按「点」出，k = 被 maxWidth 缩小的倍数 */
+function mapping(rect, k = 1) {
+  if (k === 1 && rect.x === 0 && rect.y === 0) return '图上坐标就是屏幕坐标，可以直接给 desktop_click。'
+  const f = (o, v) => (k === 1 ? `${o} + ${v}` : `${o} + ${v}×${Number(k.toFixed(3))}`)
+  return `图上 (u, v) 对应屏幕坐标 (${f(rect.x, 'u')}, ${f(rect.y, 'v')})，换算好再给 desktop_click。`
+}
+
+/** 截图临时文件放这里：用户自己的临时目录下新建的 0700 子目录（别的账号读不到），用完整个删掉 */
+const privateDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cu-'))
+const removeDir = (dir) => { try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
+
+/** 正整数参数（插件手搓的 defineTool 不做入参校验，这里自己把关）；没给回 undefined */
+function positiveInt(value, name) {
+  if (value === undefined || value === null) return undefined
+  const n = Number(value)
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} 要是正整数，收到的是 ${JSON.stringify(value)}`)
+  return n
+}
+
 function parseWindows(raw) {
   return raw.split('\n').filter(Boolean).map((line) => {
     const [pid, wid, app, title, bounds] = line.split('\t')
-    const m = /(\d+),(\d+) (\d+)×(\d+)/.exec(bounds || '')
+    const m = RECT_RE.exec(bounds || '')
     return {
       pid: Number(pid), windowId: Number(wid), app, title,
       x: m ? Number(m[1]) : 0, y: m ? Number(m[2]) : 0,
@@ -228,11 +301,12 @@ export function apply(ctx, config) {
     defineTool({
       name: 'desktop_screenshot',
       description:
-        '给屏幕或某个窗口截图，图片直接返回给你看。给了 pid 就只截那个应用最前面的窗口，' +
-        '否则截全屏。**先截图、看清按钮位置，再用 desktop_click 按坐标点** —— 这是推荐的工作方式。',
+        '给屏幕或某个窗口截图，图片直接返回给你看。给了 pid 就只截那个应用最前面的窗口（在哪块屏都行），' +
+        '否则截主显示器。图按「点」出（1 像素 = 1 点）：全屏图上的坐标就是屏幕坐标；窗口图的换算方式写在返回文字里。' +
+        '**先截图、看清按钮位置，再用 desktop_click 按坐标点** —— 这是推荐的工作方式。',
       parameters: {
         pid: { type: 'integer', description: '可选：只截这个进程的窗口' },
-        maxWidth: { type: 'integer', description: '可选：缩小到多少像素宽（默认原图）' },
+        maxWidth: { type: 'integer', description: '可选：缩小到多少像素宽（默认不缩；缩了以后坐标要按返回文字里的倍数换算）' },
       },
       output: {
         schema: {
@@ -249,38 +323,47 @@ export function apply(ctx, config) {
       },
       presentCall: present('Desktop screenshot'),
       async execute(args) {
-        const file = path.join(os.tmpdir(), `dsh-cu-${Date.now()}.png`)
-        let target = ''
-        if (args.pid) {
-          const wins = parseWindows(await run(['winlist'])).filter((w) => w.pid === Number(args.pid))
-          if (!wins.length) throw new Error(`pid ${args.pid} 没有可见窗口`)
-          const w = wins[0]
-          target = `${w.app} «${w.title}» @(${w.x},${w.y}) ${w.width}×${w.height}`
-          // 全屏截完再裁 —— 锁屏/无窗口时 -R 会失败，全屏更稳
-          const full = path.join(os.tmpdir(), `dsh-cu-full-${Date.now()}.png`)
-          await run(['shot', '--out', full], 60000)
-          execFileSync('/usr/bin/sips', ['-c', String(w.height), String(w.width), '--cropOffset', String(w.y), String(w.x), full, '--out', file], { stdio: 'ignore' })
-        } else {
-          await run(['shot', '--out', file], 60000)
-          target = '全屏'
+        const maxWidth = positiveInt(args.maxWidth, 'maxWidth')
+        const dir = privateDir()
+        const file = path.join(dir, 'shot.png')
+        let keep = false
+        try {
+          const a = ['shot']
+          let target = '主显示器'
+          if (args.pid) {
+            const wins = parseWindows(await run(['winlist'])).filter((w) => w.pid === Number(args.pid))
+            if (!wins.length) throw new Error(`pid ${args.pid} 没有可见窗口`)
+            const w = wins[0]
+            target = `${w.app} «${w.title}»`
+            // 引擎截窗口所在那块屏，按那块屏的原点和缩放比裁（Retina / 副屏 / 负坐标都对）
+            a.push('--rect', `${w.x},${w.y},${w.width},${w.height}`)
+          }
+          a.push('--out', file)                         // 放最后：万一碰上旧引擎（拿最后一个参数当输出路径）也只会写进私有目录
+          const rect = parseRect(await run(a, 60000))
+          if (!rect) throw new Error('dsh-cu shot 没回截图范围：命令行引擎太旧，重新跑一遍 install.sh')
+          let buf = fs.readFileSync(file)
+          let k = 1
+          if (maxWidth && maxWidth < rect.width && buf.length > 200_000) {
+            execFileSync('/usr/bin/sips', ['--resampleWidth', String(maxWidth), file, '--out', file], { stdio: 'ignore' })
+            buf = fs.readFileSync(file)
+            k = rect.width / maxWidth
+          }
+          const note = `截图（${target} @(${rect.x},${rect.y}) ${rect.width}×${rect.height}，${Math.round(buf.length / 1024)}KB）\n${mapping(rect, k)}`
+          const attachments = ctx.get('attachments')
+          if (attachments) {
+            try {
+              const [ref] = await attachments.saveImages([{ data: buf, mediaType: 'image/png', name: `desktop-${Date.now()}.png` }])
+              const token = crypto.randomUUID()
+              shotRefs.set(token, ref)
+              if (shotRefs.size > 20) shotRefs.delete(shotRefs.keys().next().value)
+              return { text: note, token }
+            } catch { /* 落文件兜底 */ }
+          }
+          keep = true
+          return { text: `${note}\n（附件库不可用，已存到 ${file}）`, token: '' }
+        } finally {
+          if (!keep) removeDir(dir)
         }
-        let buf = fs.readFileSync(file)
-        if (args.maxWidth && buf.length > 200_000) {
-          execFileSync('/usr/bin/sips', ['--resampleWidth', String(args.maxWidth), file, '--out', file], { stdio: 'ignore' })
-          buf = fs.readFileSync(file)
-        }
-        const note = `截图（${target}，${Math.round(buf.length / 1024)}KB）`
-        const attachments = ctx.get('attachments')
-        if (attachments) {
-          try {
-            const [ref] = await attachments.saveImages([{ data: buf, mediaType: 'image/png', name: `desktop-${Date.now()}.png` }])
-            const token = crypto.randomUUID()
-            shotRefs.set(token, ref)
-            if (shotRefs.size > 20) shotRefs.delete(shotRefs.keys().next().value)
-            return { text: note, token }
-          } catch { /* 落文件兜底 */ }
-        }
-        return { text: `${note}\n（附件库不可用，已存到 ${file}）`, token: '' }
       },
     }),
 
@@ -302,7 +385,7 @@ export function apply(ctx, config) {
       presentCall: present('Desktop click'),
       async execute(args) {
         if (args.index) {
-          ensureCursor()
+          await ensureCursor()
           const a = ['click-index', String(args.pid), String(args.index)]
           if (!cursorOn()) a.push('--no-cursor')
           return { text: await run(a) }
@@ -313,13 +396,14 @@ export function apply(ctx, config) {
           x = hit.x; y = hit.y; how = `文字「${hit.text}」`
         }
         if (x === undefined || y === undefined) throw new Error('要么给 text，要么给 x 和 y')
-        ensureCursor()
+        await ensureCursor()
         cursorSay(args.text ? `label 点击 ${short(args.text)}` : 'label 点击')
         const a = ['clickat', String(args.pid), String(Math.round(x)), String(Math.round(y))]
         if (args.global) a.push('--global')
         if (!cursorOn()) a.push('--no-cursor')
-        await run(a)
-        return { text: `已点击 ${how} → (${Math.round(x)}, ${Math.round(y)})` }
+        // 用引擎的真实结果：进程退出了、没辅助功能权限，引擎会报错，不能一律说点上了
+        const out = await run(a)
+        return { text: args.text ? `${out}（${how}）` : out }
       },
     }),
 
@@ -349,37 +433,46 @@ export function apply(ctx, config) {
       },
       presentCall: present('Desktop observe'),
       async execute(args) {
-        const out = path.join(os.tmpdir(), `dsh-cu-observe-${args.pid}-${Date.now()}.png`)
-        const a = ['observe', String(args.pid), '--out', out]
-        if (args.limit) a.push('--limit', String(args.limit))
-        if (!cursorOn()) a.push('--no-cursor')
-        ensureCursor()
-        cursorSay('label 查看窗口')
-        let raw
+        const limit = positiveInt(args.limit, 'limit')
+        const dir = privateDir()
+        const out = path.join(dir, `observe-${args.pid}.png`)
+        let keep = false
         try {
-          raw = await run(a, 60000)
-        } catch (e) {
-          throw new Error(`${e.message}\n（如果应用没有窗口，或屏幕锁着，就用 desktop_screenshot + desktop_find_text）`)
-        }
-        const lines = raw.split('\n')
-        const file = lines[0]
-        const win = (lines.find((l) => l.startsWith('window\t')) || '').split('\t')[1] || ''
-        const items = lines.filter((l) => /^\d+\t/.test(l))
-        const text = `窗口 ${win}，共 ${items.length} 个可点元素：\n` +
-          items.map((l) => { const [i, role, label, xy] = l.split('\t'); return `  [${i}] ${role.replace('AX', '')} «${label}» @${xy}` }).join('\n')
-
-        const buf = fs.readFileSync(file)
-        const attachments = ctx.get('attachments')
-        if (attachments) {
+          const a = ['observe', String(args.pid)]
+          if (limit) a.push('--limit', String(limit))
+          if (!cursorOn()) a.push('--no-cursor')
+          a.push('--out', out)                          // 放最后，理由同 desktop_screenshot
+          await ensureCursor()
+          cursorSay('label 查看窗口')
+          let raw
           try {
-            const [ref] = await attachments.saveImages([{ data: buf, mediaType: 'image/png', name: `observe-${args.pid}.png` }])
-            const token = crypto.randomUUID()
-            shotRefs.set(token, ref)
-            if (shotRefs.size > 20) shotRefs.delete(shotRefs.keys().next().value)
-            return { text, token }
-          } catch {}
+            raw = await run(a, 60000)
+          } catch (e) {
+            throw new Error(`${e.message}\n（如果应用没有窗口，或屏幕锁着，就用 desktop_screenshot + desktop_find_text）`)
+          }
+          const lines = raw.split('\n')
+          const file = lines[0]
+          const win = (lines.find((l) => l.startsWith('window\t')) || '').split('\t')[1] || ''
+          const items = lines.filter((l) => /^\d+\t/.test(l))
+          const text = `窗口 ${win}，共 ${items.length} 个可点元素：\n` +
+            items.map((l) => { const [i, role, label, xy] = l.split('\t'); return `  [${i}] ${role.replace('AX', '')} «${label}» @${xy}` }).join('\n')
+
+          const buf = fs.readFileSync(file)
+          const attachments = ctx.get('attachments')
+          if (attachments) {
+            try {
+              const [ref] = await attachments.saveImages([{ data: buf, mediaType: 'image/png', name: `observe-${args.pid}.png` }])
+              const token = crypto.randomUUID()
+              shotRefs.set(token, ref)
+              if (shotRefs.size > 20) shotRefs.delete(shotRefs.keys().next().value)
+              return { text, token }
+            } catch {}
+          }
+          keep = true
+          return { text: `${text}\n（附件库不可用，标注图在 ${file}）`, token: '' }
+        } finally {
+          if (!keep) removeDir(dir)
         }
-        return { text: `${text}\n（附件库不可用，标注图在 ${file}）`, token: '' }
       },
     }),
 
@@ -443,20 +536,21 @@ export function apply(ctx, config) {
 
     defineTool({
       name: 'desktop_scroll',
-      description: '在目标窗口的 (x, y) 处滚动。dy 为正向下滚、为负向上滚；dx 横向（默认 0）。',
+      description: '在目标窗口的 (x, y) 处滚动，单位是「行」（一般 3~10）。dy 为正向下滚、为负向上滚；dx 为正向右、为负向左（默认 0）。',
       parameters: {
         pid: { type: 'integer', required: true, description: '目标进程 pid' },
         x: { type: 'integer', required: true, description: '滚轮所在屏幕坐标 X' },
         y: { type: 'integer', required: true, description: '滚轮所在屏幕坐标 Y' },
-        dy: { type: 'integer', required: true, description: '纵向滚动量（正=向下）' },
-        dx: { type: 'integer', description: '横向滚动量，默认 0' },
+        dy: { type: 'integer', required: true, description: '纵向滚几行（正=向下，负=向上）' },
+        dx: { type: 'integer', description: '横向滚几行（正=向右，负=向左），默认 0' },
       },
       output: textOutput,
       presentCall: present('Desktop scroll'),
       async execute(args) {
-        ensureCursor()
+        await ensureCursor()
         cursorSay(`label ${args.dy < 0 ? '向上滚动' : '向下滚动'}`)
-        const a = ['scroll', String(args.pid), String(args.x), String(args.y), String(args.dy)]
+        // scroll-lines：单位是行、正=向下。旧引擎不认这个名字会直接报错，不会按像素反着滚
+        const a = ['scroll-lines', String(args.pid), String(args.x), String(args.y), String(args.dy)]
         if (args.dx) a.push(String(args.dx))
         if (!cursorOn()) a.push('--no-cursor')
         return { text: await run(a) }
@@ -476,7 +570,7 @@ export function apply(ctx, config) {
       output: textOutput,
       presentCall: present('Desktop drag'),
       async execute(args) {
-        ensureCursor()
+        await ensureCursor()
         cursorSay('label 拖拽')
         const a = ['drag', String(args.pid), String(args.x1), String(args.y1), String(args.x2), String(args.y2)]
         if (!cursorOn()) a.push('--no-cursor')
@@ -488,7 +582,8 @@ export function apply(ctx, config) {
       name: 'desktop_key',
       description:
         '给目标进程发按键。keycode 用 macOS 虚拟键码（回车 36、Tab 48、Esc 53、空格 49、' +
-        '方向键 123-126、删除 51）。可加修饰键：cmd / shift / alt / ctrl，例如 cmd+shift 就是 ["cmd","shift"]。',
+        '方向键 123-126、删除 51）。可加修饰键：cmd / shift / alt / ctrl，例如 cmd+shift 就是 ["cmd","shift"]。' +
+        '目标在后台时，带 cmd 的全选 / 复制 / 粘贴这类系统快捷键多半不生效。',
       parameters: {
         pid: { type: 'integer', required: true, description: '目标进程 pid' },
         keycode: { type: 'integer', required: true, description: 'macOS 虚拟键码，例如回车 36' },

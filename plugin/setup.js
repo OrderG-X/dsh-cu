@@ -38,15 +38,18 @@ export function findBin() {
 
 export const OVERLAY = process.env.DSH_CU_OVERLAY || path.join(os.homedir(), '.dsh/bin/dsh-cursor-overlay')
 
+// 只认当前账号的浮层：别的账号开着的不算、也不去关
+const MINE = ['-U', String(process.getuid()), '-f', 'dsh-cursor-overlay']
+
 export function overlayState() {
   let installed = false, running = false
   try { fs.accessSync(OVERLAY, fs.constants.X_OK); installed = true } catch {}
-  try { execFileSync('/usr/bin/pgrep', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' }); running = true } catch {}
+  try { execFileSync('/usr/bin/pgrep', MINE, { stdio: 'ignore' }); running = true } catch {}
   return { installed, running }
 }
 
 export function stopOverlay() {
-  try { execFileSync('/usr/bin/pkill', ['-f', 'dsh-cursor-overlay'], { stdio: 'ignore' }) } catch { /* 本来就没跑 */ }
+  try { execFileSync('/usr/bin/pkill', MINE, { stdio: 'ignore' }) } catch { /* 本来就没跑 */ }
 }
 
 // ── 系统权限 ────────────────────────────────────────────────────────────────

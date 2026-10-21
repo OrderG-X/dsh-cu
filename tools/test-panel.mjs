@@ -18,6 +18,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cu-test-'))
 const argLog = path.join(tmp, 'args.log')
 const fakeBin = path.join(tmp, 'dsh-cu')
 fs.writeFileSync(fakeBin, `#!/bin/sh
+if [ "$1" = version ]; then echo 2; exit 0; fi
 echo "$@" >> "${argLog}"
 if [ "$1" = winlist ]; then printf '1\\t2\\tFinder\\t\\t0,0 100×100\\n3\\t4\\tNotes\\tx\\t10,10 200×200\\n'; fi
 `, { mode: 0o755 })
