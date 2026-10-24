@@ -19,6 +19,7 @@ const argLog = path.join(tmp, 'args.log')
 const fakeBin = path.join(tmp, 'dsh-cu')
 fs.writeFileSync(fakeBin, `#!/bin/sh
 if [ "$1" = version ]; then echo 2; exit 0; fi
+if [ "$1" = features ]; then echo window-shot; exit 0; fi
 echo "$@" >> "${argLog}"
 if [ "$1" = winlist ]; then printf '1\\t2\\tFinder\\t\\t0,0 100×100\\n3\\t4\\tNotes\\tx\\t10,10 200×200\\n'; fi
 `, { mode: 0o755 })
@@ -80,7 +81,7 @@ try {
     const { status, body } = await req('GET')
     assert.equal(status, 200)
     assert.equal(body.platform, 'darwin')
-    assert.deepEqual(body.bin, { source: 'env' })
+    assert.deepEqual(body.bin, { source: 'env', outdated: false })
     assert.equal(body.windows, 2)
     assert.ok(['boolean', 'object'].includes(typeof body.perms.screen))
     assert.ok(['boolean', 'object'].includes(typeof body.perms.ax))
